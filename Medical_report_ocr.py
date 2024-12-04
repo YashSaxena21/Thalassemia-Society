@@ -50,7 +50,7 @@ def main():
             return base64.b64encode(image_file.read()).decode()
 
     # Path to your local image
-    image_path = r"C:\Users\yashs\Downloads\Thalassemia Society.jpg"
+    image_path = ".\Thalassemia Society.jpg"
 
     # Convert the image to base64
     icon_base64 = image_to_base64(image_path)
@@ -59,7 +59,7 @@ def main():
     st.set_page_config(page_title="Medical Report OCR", page_icon=f"data:image/jpg;base64,{icon_base64}", layout="wide")
     
     # Add an image at the top for branding or guidance
-    st.image(r"C:\Users\yashs\Downloads\Thalassemia Society.jpg", caption="Medical Report OCR", width=400)
+    st.image(".\Thalassemia Society.jpg", caption="Medical Report OCR", width=400)
 
 
     st.title("Thalassemia Society Bareilly Medical Report Organizer")
