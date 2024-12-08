@@ -1,11 +1,22 @@
 import os
+import re
 import pytesseract
 from PIL import Image, ImageEnhance
 import streamlit as st
-import re
+from pdf2image import convert_from_path
+import pdfplumber
+import tempfile
 import base64
 
-# Function to extract text from image using OCR
+# Function to handle Streamlit's UploadedFile for pdf2image or pdfplumber
+def handle_uploaded_file(uploaded_file):
+    # Save to a temporary file and return its path
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
+        temp_file.write(uploaded_file.read())
+        temp_file_path = temp_file.name
+    return temp_file_path
+
+# Function to extract text from an image
 def extract_text_from_image(image):
     gray_image = image.convert("L")  # Convert image to grayscale
     enhancer = ImageEnhance.Contrast(gray_image)
@@ -13,25 +24,85 @@ def extract_text_from_image(image):
     text = pytesseract.image_to_string(enhanced_image, config="--psm 6")  # Extract text
     return ' '.join(text.splitlines()).strip()  # Clean up extracted text
 
-# Function to extract patient's name from text
+# Function to extract text from the first page of a PDF
+def extract_text_from_pdf(pdf_file):
+    text = ""
+    temp_path = handle_uploaded_file(pdf_file)  # Convert UploadedFile to a file path
+    try:
+        # Use pdfplumber for structured text extraction from the first page
+        with pdfplumber.open(temp_path) as pdf:
+            first_page = pdf.pages[0]  # Extract only the first page
+            text = first_page.extract_text() or ""
+    except Exception as e:
+        print("Error using pdfplumber:", e)
+
+    # If no text extracted, fallback to OCR on the first page
+    if not text.strip():
+        text = extract_text_from_first_page_with_ocr(temp_path)
+    return text.strip()
+
+# Fallback: Extract text from the first page of a scanned PDF using OCR
+def extract_text_from_first_page_with_ocr(pdf_file_path):
+    text = ""
+    images = convert_from_path(pdf_file_path, first_page=1, last_page=1)  # Convert only the first page to an image
+    for image in images:
+        text += extract_text_from_image(image) + "\n"  # Apply OCR to the first page
+    return text
+
+# Enhanced function to extract only the patient's name
+
 def extract_patient_name(text):
-    match = re.search(r"(?:Name[:\-]?\s*|mr[\.]?\s*|mr\s*\.?\s*)([A-Za-z\s,]+)", text)
+    # Clean and normalize text
+    text = re.sub(r'\s+', ' ', text)  # Replace multiple spaces/newlines with a single space
+    print("Cleaned Text for Debugging:", text)  # Debugging: Print cleaned text
+
+    # Enhanced regex for capturing the full name
+    match = re.search(
+        r"(?:NAME|Name)\s*[:\-]?\s*(?:MR\.?|MRS\.?)?\s*([A-Z][a-z]*\s+[A-Z][a-z]*)",
+        text,
+        re.IGNORECASE,
+    )
+    
     if match:
-        name = match.group(1).strip().replace(',', '.')  # Replace commas with periods
-        name = name.upper()  # Capitalize the name
-        return name
+        name = match.group(1).strip()
+        print("Matched Name:", name)  # Debugging: Log the matched name
+        
+        # Remove unnecessary words like "MR.", "MRS.", "Lab No.", etc.
+        name = remove_unnecessary_words(name)
+        print("Cleaned Name:", name)  # Debugging: Log the cleaned name
+        
+        return name.title()  # Convert to Title Case
+    print("No Match Found in Text")  # Debugging: Log failure
     return None
 
-# Function to handle report file and move it to the patient's folder
-def handle_report(file, destination_path):
+
+def remove_unnecessary_words(name):
+    # List of words or terms to be removed from the name
+    unnecessary_words = ["MR.", "MRS.", "DR.", "LAB", "BILLING", "AGE", "SEX", "P. ID", "REFERRED", "REPORT"]
+    
+    # Loop through each term in the unnecessary_words list and remove it if it exists in the name
+    for word in unnecessary_words:
+        name = re.sub(rf"\b{word}\b", "", name, flags=re.IGNORECASE).strip()
+    
+    # Clean up any extra spaces
+    name = re.sub(r'\s+', ' ', name).strip()
+    return name
+
+#r"(?:NAME|Name)\s*[:\-]?\s*(?:MR\.?|MRS\.?)?\s*([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?)\s*(?=\s*(?:Billing Date|Age|Sex|P\. ID|Lab|,|:))"
+#r"(?:NAME|Name)\s*[:\-]?\s*(?:MR\.?|MRS\.?)?\s*([A-Z]+(?:\s+[A-Z]+)?)\s*(?=\s(BILLING DATE|AGE|SEX|,|:))"
+# Function to handle file uploads and save to the correct folder
+def handle_report(file, file_type, destination_path):
     destination_path = destination_path.strip()
     if not os.path.isdir(destination_path):
         return "Invalid path! Please ensure the destination folder exists."
-    
-    image = Image.open(file)
-    text_content = extract_text_from_image(image)
-    
-    # Extract the patient's name
+
+    # Extract text based on file type
+    if file_type == "pdf":
+        text_content = extract_text_from_pdf(file)
+    else:
+        return "Unsupported file type."
+
+    # Extract patient's name
     patient_name = extract_patient_name(text_content)
     if patient_name:
         folder_path = os.path.join(destination_path, patient_name)
@@ -41,9 +112,9 @@ def handle_report(file, destination_path):
             f.write(file.getbuffer())  # Save the file to the folder
         return f"Report successfully saved in folder: {folder_path}"
     else:
-        return "Could not extract patient's name. Please check the report format."
+        return "Could not extract the patient's name. Please check the report format."
 
-# Streamlit app with improved UX and design
+# Streamlit app
 def main():
     def image_to_base64(image_path):
         with open(image_path, "rb") as image_file:
@@ -60,46 +131,32 @@ def main():
     
     # Add an image at the top for branding or guidance
     st.image("Thalassemia_Society.jpg", caption="Medical Report OCR", width=400)
-
-
     st.title("Thalassemia Society Bareilly Medical Report Organizer")
-    
-    # Add some styled instructions and a brief description
     st.markdown("""
     ## Welcome to the Medical Report OCR tool!
-    Upload a medical report image, and we'll automatically extract the patient's name and organize the report into a folder for you. 
-    Enter a destination folder where the report will be saved.
+    Upload a medical report (PDF), and we'll automatically extract the patient's name and organize the report into a folder for you.
     """)
 
-    # File uploader for the medical report
-    uploaded_file = st.file_uploader("Upload the Medical Report Image", type=["png", "jpg", "jpeg"], label_visibility="collapsed")
-    
-    # Add file preview
-    if uploaded_file:
-        st.image(uploaded_file, caption="Uploaded Report Image", use_column_width=True)
-    
-    # Manual destination folder input (stylized with custom placeholder text)
-    destination_folder = st.text_input("Destination Folder Path", "Enter path here (e.g., C:/Reports)", label_visibility="collapsed")
-    
-    # Stylish submit button with custom styles
-    submit_button = st.button("Process Report", use_container_width=True)
-    
-    # Handle report when the button is clicked
-    if submit_button and uploaded_file and destination_folder:
-        with st.spinner("Processing report... Please wait."):
-            result = handle_report(uploaded_file, destination_folder)
-            st.success(result)  # Display success message
-        
-    elif submit_button:
-        st.warning("Please upload a medical report and specify a destination folder.")
+    # File uploader for medical reports
+    uploaded_file = st.file_uploader("Upload a Medical Report (PDF)", type=["pdf"])
+    file_type = None
 
-    # Improve the UX for error messages or empty states
-    if not uploaded_file:
-        st.markdown("""
-        <p style="color:grey; font-size: 16px; text-align: center;">
-            Upload a report to get started! Only image files (PNG, JPG) are supported.
-        </p>
-        """, unsafe_allow_html=True)
+    if uploaded_file:
+        # Determine file type
+        st.info("PDF file uploaded successfully.")
+        file_type = "pdf"
+
+    # Destination folder input
+    destination_folder = st.text_input("Destination Folder Path", placeholder="Enter path here (e.g., C:/Reports)")
+
+    # Submit button
+    if st.button("Process Report"):
+        if uploaded_file and destination_folder:
+            with st.spinner("Processing report..."):
+                result = handle_report(uploaded_file, file_type, destination_folder)
+                st.success(result)
+        else:
+            st.warning("Please upload a file and specify a destination folder.")
 
 if __name__ == "__main__":
     main()
